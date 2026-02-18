@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vejr Dashboard — Europæiske Fragtlufthavne</title>
+
+    <!--
+        HVAD DENNE FIL GØRE:
+        1. Henter TAF-data (Terminal Aerodrome Forecast) fra aviationweather.gov
+        2. Parser vejrdata for de næste 6 timer
+        3. Viser et trafiklys per lufthavn baseret på forsinkelsesrisiko
+
+        TAF = Terminal Aerodrome Forecast — officiel vejrudsigt til luftfart
+        Udstedes af nationale meteorologiske tjenester, opdateres hvert 6. time.
+
+        API: aviationweather.gov — gratis, ingen API-nøgle nødvendig
+    -->
+
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: #0f1923;
+            color: #e0e6ed;
+            min-height: 100vh;
+            padding: 24px;
+        }
+
+        /* ── HEADER ── */
+        header {
+            max-width: 1100px;
+            margin: 0 auto 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .header-titel {
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: #ffffff;
+            letter-spacing: 0.5px;
+        }
+
+        .header-titel span {
+            color: #4a9eff;
+        }
+
+        .header-meta {
+            font-size: 0.8rem;
+            color: #7a8a99;
+        }
+
+        /* Opdater-knap */
+        .opdater-btn {
+            background: #1e3a5f;
+            border: 1px solid #2a5080;
+            color: #4a9eff;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 600;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .opdater-btn:hover { background: #2a5080; }
+        .opdater-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Spin-animation på opdater-ikonet */
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .spinner { display: inline-block; }
+        .spinner.aktiv { animation: spin 0.8s linear infinite; }
+
+        /* ── FORKLARINGSBOKS ── */
+        .forklaring {
+            max-width: 1100px;
+            margin: 0 auto 24px;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .forklaring-kort {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #1a2633;
+            border: 1px solid #2a3a4a;
+            border-radius: 8px;
+            padding: 8px 14px;
+            font-size: 0.82rem;
+        }
+
+        .dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .dot.groen  { background: #27ae60; box-shadow: 0 0 6px #27ae6088; }
+        .dot.gul    { background: #f39c12; box-shadow: 0 0 6px #f39c1288; }
+        .dot.roed   { background: #e74c3c; box-shadow: 0 0 6px #e74c3c88; }
+        .dot.graa   { background: #555; }
+
+        /* ── AIRPORT GRID ── */
+        .grid {
+            max-width: 1100px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 16px;
+        }
+
+        /* ── AIRPORT KORT ── */
+        .kort {
+            background: #1a2633;
+            border: 1px solid #2a3a4a;
+            border-radius: 12px;
+            padding: 20px;
+            transition: border-color 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Farvet streg øverst afhængig af status */
+        .kort::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+        }
+
+        .kort.groen::before { background: #27ae60; }
+        .kort.gul::before   { background: #f39c12; }
+        .kort.roed::before  { background: #e74c3c; }
+        .kort.graa::before  { background: #444; }
+
+        .kort-top {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            margin-bottom: 14px;
+        }
+
+        .lufthavn-navn {
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .lufthavn-koder {
+            font-size: 0.78rem;
+            color: #7a8a99;
+            margin-top: 3px;
+        }
+
+        /* Trafiklys-cirkel */
+        .trafiklys {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.3rem;
+            flex-shrink: 0;
+        }
+
+        .trafiklys.groen { background: #1a4a2e; border: 2px solid #27ae60; box-shadow: 0 0 12px #27ae6055; }
+        .trafiklys.gul   { background: #4a3a0a; border: 2px solid #f39c12; box-shadow: 0 0 12px #f39c1255; }
+        .trafiklys.roed  { background: #4a1a1a; border: 2px solid #e74c3c; box-shadow: 0 0 12px #e74c3c55; }
+        .trafiklys.graa  { background: #2a2a2a; border: 2px solid #555; }
+
+        /* Status-tekst */
+        .status-tekst {
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            display: inline-block;
+        }
+
+        .status-tekst.groen { color: #2ecc71; background: #1a4a2e; }
+        .status-tekst.gul   { color: #f1c40f; background: #4a3a0a; }
+        .status-tekst.roed  { color: #e74c3c; background: #4a1a1a; }
+        .status-tekst.graa  { color: #888; background: #2a2a2a; }
+
+        /* Vejrdetaljer */
+        .detaljer {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+            margin-top: 12px;
+        }
+
+        .detalje-felt {
+            background: #0f1923;
+            border-radius: 6px;
+            padding: 7px 10px;
+        }
+
+        .detalje-label {
+            font-size: 0.7rem;
+            color: #556677;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+
+        .detalje-vaerdi {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #ccd8e4;
+            margin-top: 2px;
+        }
+
+        /* Årsag til status */
+        .aarsag {
+            margin-top: 10px;
+            font-size: 0.8rem;
+            color: #7a8a99;
+            font-style: italic;
+            min-height: 1.2em;
+        }
+
+        /* Gyldig periode */
+        .gyldig {
+            margin-top: 12px;
+            font-size: 0.72rem;
+            color: #445566;
+            border-top: 1px solid #1e2d3d;
+            padding-top: 8px;
+        }
+
+        /* Loading og fejl states */
+        .loading-tekst {
+            color: #445566;
+            font-size: 0.85rem;
+            font-style: italic;
+        }
+
+        .fejl-boks {
+            max-width: 1100px;
+            margin: 0 auto;
+            background: #4a1a1a;
+            border: 1px solid #e74c3c;
+            border-radius: 8px;
+            padding: 16px 20px;
+            color: #e74c3c;
+            display: none;
+        }
+
+        /* Responsive */
+        @media (max-width: 500px) {
+            body { padding: 12px; }
+            .grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- ── HEADER ── -->
+<header>
+    <div>
+        <div class="header-titel">✈️ Vejr Dashboard — <span>Europæiske Fragtlufthavne</span></div>
+        <div class="header-meta" id="sidst-opdateret">Henter data...</div>
+    </div>
+    <button class="opdater-btn" onclick="hentAlle()" id="opdater-knap">
+        <span class="spinner" id="spinner">↻</span> Opdater
+    </button>
+</header>
+
+<!-- ── FORKLARING ── -->
+<div class="forklaring">
+    <div class="forklaring-kort"><div class="dot groen"></div> Ingen væsentlige forsinkelser</div>
+    <div class="forklaring-kort"><div class="dot gul"></div> Mulige forsinkelser</div>
+    <div class="forklaring-kort"><div class="dot roed"></div> Forsinkelser sandsynlige</div>
+    <div class="forklaring-kort"><div class="dot graa"></div> Data utilgængeligt</div>
+</div>
+
+<!-- ── FEJLBOKS ── -->
+<div class="fejl-boks" id="fejl-boks">
+    ⚠️ Kunne ikke hente vejrdata. Tjek din internetforbindelse og prøv igen.
+</div>
+
+<!-- ── AIRPORT GRID ── -->
+<!--
+    Kortene bygges dynamisk af JavaScript nedenfor.
+    Hvert kort oprettes med document.createElement() og fyldes med data.
+-->
+<div class="grid" id="grid"></div>
+
+
+<script>
+
+    // ─── 1. DATA: DE 10 TRAVLESTE EUROPÆISKE FRAGTLUFTHAVNE ──────────────────
+    //
+    // ICAO-kode bruges til at hente TAF — det er den officielle 4-bogstavs kode.
+    // IATA-kode er den 3-bogstavs kode du kender fra bagagemærker (FRA, AMS osv.)
+
+    const lufthavne = [
+        { icao: 'EDDF', iata: 'FRA', navn: 'Frankfurt',         land: '🇩🇪' },
+        { icao: 'EHAM', iata: 'AMS', navn: 'Amsterdam Schiphol',land: '🇳🇱' },
+        { icao: 'LFPG', iata: 'CDG', navn: 'Paris Charles de Gaulle', land: '🇫🇷' },
+        { icao: 'EDDP', iata: 'LEJ', navn: 'Leipzig/Halle',     land: '🇩🇪' },
+        { icao: 'EGLL', iata: 'LHR', navn: 'London Heathrow',   land: '🇬🇧' },
+        { icao: 'LTFM', iata: 'IST', navn: 'Istanbul',          land: '🇹🇷' },
+        { icao: 'EBBR', iata: 'BRU', navn: 'Bruxelles',         land: '🇧🇪' },
+        { icao: 'EBLG', iata: 'LGG', navn: 'Liège',             land: '🇧🇪' },
+        { icao: 'EDDK', iata: 'CGN', navn: 'Köln/Bonn',         land: '🇩🇪' },
+        { icao: 'LIMC', iata: 'MXP', navn: 'Milano Malpensa',   land: '🇮🇹' },
+    ];
+
+
+    // ─── 2. API-KALD: HENT TAF-DATA ──────────────────────────────────────────
+    //
+    // aviationweather.gov er en gratis, officiel tjeneste fra USA's vejrtjeneste (NOAA).
+    // Vi henter TAF for alle 10 lufthavne i ét kald ved at sætte ICAO-koderne i URL'en.
+    //
+    // format=json giver os strukturerede data (ikke rå TAF-tekst)
+    // timeType=valid begrænser til den gyldige periode
+
+    async function hentTAF(icaoKoder) {
+        const ids = icaoKoder.join(',');
+        const url = `https://aviationweather.gov/api/data/taf?ids=${ids}&format=json&timeType=valid`;
+
+        // fetch() er JavaScripts indbyggede funktion til at hente data fra internettet
+        // 'await' betyder: vent på svaret før vi fortsætter
+        const svar = await fetch(url);
+
+        if (!svar.ok) throw new Error(`HTTP fejl: ${svar.status}`);
+
+        // .json() konverterer tekst-svaret til et JavaScript-objekt
+        return await svar.json();
+    }
+
+    // ─── DEMO-DATA: Realistiske testdata til lokal visning ───────────────────
+    //
+    // Når API-kaldet fejler (lokal fil eller netværksbegrænsning), bruger vi
+    // disse data så dashboardet stadig kan vises. I produktion (GitHub Pages)
+    // bruges altid live data.
+
+    function demoData() {
+        const nu = new Date().toISOString();
+        const om24 = new Date(Date.now() + 24*60*60*1000).toISOString();
+        const om6  = new Date(Date.now() + 6*60*60*1000).toISOString();
+
+        return [
+            { icaoId: 'EDDF', validTimeFrom: nu, validTimeTo: om24,
+              fcsts: [{ timeFrom: nu, timeTo: om6, wspd: 12, wdir: 270, visib: '9', wxString: '', clouds: [{cover:'FEW', base:3000}] }] },
+            { icaoId: 'EHAM', validTimeFrom: nu, validTimeTo: om24,
+              fcsts: [{ timeFrom: nu, timeTo: om6, wspd: 18, wdir: 240, visib: '2', wxString: 'BR', clouds: [{cover:'OVC', base:400}] }] },
+            { icaoId: 'LFPG', validTimeFrom: nu, validTimeTo: om24,
+              fcsts: [{ timeFrom: nu, timeTo: om6, wspd: 8,  wdir: 180, visib: '9', wxString: 'RA', clouds: [{cover:'BKN', base:1200}] }] },
+            { icaoId: 'EDDP', validTimeFrom: nu, validTimeTo: om24,
+              fcsts: [{ timeFrom: nu, timeTo: om6, wspd: 6,  wdir: 220, visib: '9', wxString: '', clouds: [{cover:'FEW', base:5000}] }] },
+            { icaoId: 'EGLL', validTimeFrom: nu, validTimeTo: om24,
+              fcsts: [{ timeFrom: nu, timeTo: om6, wspd: 22, wdir: 250, visib: '4', wxString: 'SHRA', clouds: [{cover:'BKN', base:800}] }] },
+            { icaoId: 'LTFM', validTimeFrom: nu, validTimeTo: om24,
+              fcsts: [{ timeFrom: nu, timeTo: om6, wspd: 38, wdir: 310, visib: '9', wxString: 'TSRA', clouds: [{cover:'OVC', base:500}] }] },
+            { icaoId: 'EBBR', validTimeFrom: nu, validTimeTo: om24,
+              fcsts: [{ timeFrom: nu, timeTo: om6, wspd: 10, wdir: 200, visib: '9', wxString: '', clouds: [{cover:'SCT', base:2500}] }] },
+            { icaoId: 'EBLG', validTimeFrom: nu, validTimeTo: om24,
+              fcsts: [{ timeFrom: nu, timeTo: om6, wspd: 9,  wdir: 190, visib: '9', wxString: '', clouds: [{cover:'FEW', base:4000}] }] },
+            { icaoId: 'EDDK', validTimeFrom: nu, validTimeTo: om24,
+              fcsts: [{ timeFrom: nu, timeTo: om6, wspd: 14, wdir: 260, visib: '1', wxString: 'FG', clouds: [{cover:'OVC', base:100}] }] },
+            { icaoId: 'LIMC', validTimeFrom: nu, validTimeTo: om24,
+              fcsts: [{ timeFrom: nu, timeTo: om6, wspd: 5,  wdir: 090, visib: '9', wxString: '', clouds: [{cover:'FEW', base:6000}] }] },
+        ];
+    }
+
+
+    // ─── 3. TRAFIKLYS-LOGIK ──────────────────────────────────────────────────
+    //
+    // Vi kigger på de næste 6 timer af TAF-udsigten.
+    // Baseret på vejrfænomener, sigtbarhed og vind sætter vi grøn/gul/rød.
+
+    function vurderStatus(fcsts) {
+        // Finder de relevante forecast-perioder (næste 6 timer)
+        const nu = Date.now();
+        const om6timer = nu + 6 * 60 * 60 * 1000;
+
+        // Filter: kun perioder der starter inden for de næste 6 timer
+        const relevante = fcsts.filter(f => {
+            const fra = new Date(f.timeFrom).getTime();
+            return fra <= om6timer;
+        });
+
+        // Brug alle perioder hvis ingen matcher (fallback)
+        const perioder = relevante.length > 0 ? relevante : fcsts.slice(0, 2);
+
+        let sværesteStatus = 'groen';
+        let aarsag = '';
+
+        for (const periode of perioder) {
+            const wx     = (periode.wxString || '').toUpperCase();
+            const vind   = periode.wspd || 0;           // knob
+            const sigt   = parseFloat(periode.visib) || 9999; // statute miles
+            const skyer  = periode.clouds || [];
+
+            // Find laveste skydække (ceiling = BKN eller OVC)
+            const ceiling = skyer
+                .filter(s => s.cover === 'BKN' || s.cover === 'OVC')
+                .map(s => s.base || 9999)
+                .reduce((min, v) => Math.min(min, v), 9999);
+
+            // ── RØD: Alvorlige forsinkelser sandsynlige ──────────────────────
+            if (
+                wx.includes('TS')    ||   // Tordenvejr
+                wx.includes('FZRA')  ||   // Fryseregn
+                wx.includes('FZDZ')  ||   // Frysende støvregn
+                wx.includes('FZFG')  ||   // Frysende tåge
+                wx.includes('+SN')   ||   // Kraftigt snevejr
+                wx.includes('BLSN')  ||   // Snefygning
+                vind >= 35           ||   // Stærk vind (≥35 knob)
+                sigt < 0.5           ||   // Sigtbarhed under 800m
+                ceiling < 200             // Skydække under 200 fod
+            ) {
+                sværesteStatus = 'roed';
+                // Byg en forklaring til brugeren
+                if (wx.includes('TS'))   aarsag = 'Tordenvejr i udsigten';
+                else if (wx.includes('FZRA') || wx.includes('FZDZ')) aarsag = 'Fryseregn/frysende nedbør';
+                else if (wx.includes('FZFG')) aarsag = 'Frysende tåge';
+                else if (wx.includes('+SN') || wx.includes('BLSN')) aarsag = 'Kraftigt snevejr';
+                else if (vind >= 35)     aarsag = `Stærk vind: ${vind} kt`;
+                else if (sigt < 0.5)     aarsag = 'Meget lav sigtbarhed';
+                else if (ceiling < 200)  aarsag = 'Meget lavt skydække';
+                break; // Rød er worst case — vi stopper her
+            }
+
+            // ── GUL: Mulige forsinkelser ─────────────────────────────────────
+            if (
+                wx.includes('RA')    ||   // Regn
+                wx.includes('SN')    ||   // Sne
+                wx.includes('FG')    ||   // Tåge
+                wx.includes('GR')    ||   // Hagl
+                wx.includes('SH')    ||   // Byger
+                wx.includes('BR')    ||   // Let tåge/dis
+                vind >= 25           ||   // Moderat vind
+                sigt < 3             ||   // Nedsat sigtbarhed
+                ceiling < 1000            // Lavt skydække
+            ) {
+                if (sværesteStatus !== 'roed') {
+                    sværesteStatus = 'gul';
+                    if (wx.includes('TS') || wx.includes('FG')) aarsag = 'Tåge/dis i udsigten';
+                    else if (wx.includes('SN')) aarsag = 'Sne i udsigten';
+                    else if (wx.includes('RA') || wx.includes('SH')) aarsag = 'Regn i udsigten';
+                    else if (vind >= 25) aarsag = `Kraftig vind: ${vind} kt`;
+                    else if (sigt < 3)  aarsag = 'Nedsat sigtbarhed';
+                    else aarsag = 'Lavt skydække';
+                }
+            }
+        }
+
+        return { status: sværesteStatus, aarsag };
+    }
+
+
+    // ─── 4. HJÆLPEFUNKTIONER ─────────────────────────────────────────────────
+
+    // Omregn statute miles til km (TAF bruger SM)
+    function smTilKm(sm) {
+        if (sm >= 9) return '>15 km';
+        return (sm * 1.60934).toFixed(1) + ' km';
+    }
+
+    // Formater vindbeskrivelse
+    function formatVind(fcst) {
+        if (!fcst) return '—';
+        const hast = fcst.wspd || 0;
+        const retning = fcst.wdir || 0;
+        const stød = fcst.wgst ? ` (stød ${fcst.wgst} kt)` : '';
+        return `${retning}° / ${hast} kt${stød}`;
+    }
+
+    // Find den aktuelle/næste forecast-periode
+    function findAktuelPeriode(fcsts) {
+        const nu = Date.now();
+        // Find den periode der er aktiv nu
+        const aktuel = fcsts.find(f => {
+            const fra = new Date(f.timeFrom).getTime();
+            const til = new Date(f.timeTo).getTime();
+            return fra <= nu && til >= nu;
+        });
+        return aktuel || fcsts[0] || {};
+    }
+
+    // Formater dato/tid til læsbar tekst
+    function formatTid(isoStreng) {
+        if (!isoStreng) return '—';
+        const d = new Date(isoStreng);
+        return d.toLocaleString('da-DK', {
+            day: '2-digit', month: '2-digit',
+            hour: '2-digit', minute: '2-digit'
+        }) + ' UTC';
+    }
+
+    // Statusemoji
+    const emoji = { groen: '✅', gul: '⚠️', roed: '🔴', graa: '❓' };
+    const statusTekst = {
+        groen: 'Ingen forsinkelser',
+        gul:   'Mulige forsinkelser',
+        roed:  'Forsinkelser sandsynlige',
+        graa:  'Data utilgængeligt'
+    };
+
+
+    // ─── 5. BYGG ET LUFTHAVNKORT ─────────────────────────────────────────────
+    //
+    // Denne funktion opretter HTML for ét lufthavnkort.
+    // Den kaldes én gang per lufthavn med enten data eller en "mangler"-tilstand.
+
+    function byggKort(lufthavn, tafData) {
+        const kort = document.getElementById('kort-' + lufthavn.icao);
+        if (!kort) return;
+
+        if (!tafData) {
+            // Ingen data for denne lufthavn
+            kort.className = 'kort graa';
+            kort.innerHTML = `
+                <div class="kort-top">
+                    <div>
+                        <div class="lufthavn-navn">${lufthavn.land} ${lufthavn.navn}</div>
+                        <div class="lufthavn-koder">${lufthavn.iata} · ${lufthavn.icao}</div>
+                    </div>
+                    <div class="trafiklys graa">❓</div>
+                </div>
+                <span class="status-tekst graa">Data utilgængeligt</span>
+                <div class="aarsag">Ingen TAF modtaget fra stationen</div>
+            `;
+            return;
+        }
+
+        const fcsts = tafData.fcsts || [];
+        const { status, aarsag } = vurderStatus(fcsts);
+        const aktuel = findAktuelPeriode(fcsts);
+
+        // Sigtbarhed
+        const sigtRaw = parseFloat(aktuel.visib);
+        const sigtTekst = isNaN(sigtRaw) ? '—' : (sigtRaw >= 9 ? '>15 km' : smTilKm(sigtRaw));
+
+        // Laveste ceiling
+        const skyer = aktuel.clouds || [];
+        const ceilingFt = skyer
+            .filter(s => s.cover === 'BKN' || s.cover === 'OVC')
+            .map(s => s.base || 9999)
+            .reduce((min, v) => Math.min(min, v), null);
+        const ceilingTekst = ceilingFt ? `${ceilingFt} ft` : 'Klar';
+
+        // Vejrfænomen
+        const wxTekst = aktuel.wxString || 'Ingen væsentlige fænomener';
+
+        kort.className = `kort ${status}`;
+        kort.innerHTML = `
+            <div class="kort-top">
+                <div>
+                    <div class="lufthavn-navn">${lufthavn.land} ${lufthavn.navn}</div>
+                    <div class="lufthavn-koder">${lufthavn.iata} · ${lufthavn.icao}</div>
+                </div>
+                <div class="trafiklys ${status}">${emoji[status]}</div>
+            </div>
+
+            <span class="status-tekst ${status}">${statusTekst[status]}</span>
+            <div class="aarsag">${aarsag || 'Vejrforholdene er acceptable'}</div>
+
+            <div class="detaljer">
+                <div class="detalje-felt">
+                    <div class="detalje-label">Vind</div>
+                    <div class="detalje-vaerdi">${formatVind(aktuel)}</div>
+                </div>
+                <div class="detalje-felt">
+                    <div class="detalje-label">Sigtbarhed</div>
+                    <div class="detalje-vaerdi">${sigtTekst}</div>
+                </div>
+                <div class="detalje-felt">
+                    <div class="detalje-label">Skydække</div>
+                    <div class="detalje-vaerdi">${ceilingTekst}</div>
+                </div>
+                <div class="detalje-felt">
+                    <div class="detalje-label">Vejr</div>
+                    <div class="detalje-vaerdi">${wxTekst}</div>
+                </div>
+            </div>
+
+            <div class="gyldig">
+                TAF gyldig: ${formatTid(tafData.validTimeFrom)} → ${formatTid(tafData.validTimeTo)}
+            </div>
+        `;
+    }
+
+
+    // ─── 6. HOVEDFUNKTION: HENT OG VIS ALLE LUFTHAVNE ───────────────────────
+
+    async function hentAlle() {
+        const knap = document.getElementById('opdater-knap');
+        const spinner = document.getElementById('spinner');
+        const fejlBoks = document.getElementById('fejl-boks');
+
+        // Vis loading-tilstand
+        knap.disabled = true;
+        spinner.classList.add('aktiv');
+        fejlBoks.style.display = 'none';
+        document.getElementById('sidst-opdateret').textContent = 'Henter data...';
+
+        // Sæt alle kort til loading
+        lufthavne.forEach(lh => {
+            const kort = document.getElementById('kort-' + lh.icao);
+            if (kort) kort.innerHTML = `<div class="loading-tekst">Henter TAF...</div>`;
+        });
+
+        try {
+            // Hent TAF for alle 10 lufthavne i ét kald
+            const icaokoder = lufthavne.map(lh => lh.icao);
+            let tafListe;
+            try {
+                tafListe = await hentTAF(icaokoder);
+            } catch {
+                // Fallback til demo-data hvis API ikke er tilgængeligt (lokal fil)
+                tafListe = demoData();
+                document.getElementById('sidst-opdateret').textContent =
+                    '⚠️ Demo-data (API utilgængeligt lokalt — upload til GitHub Pages for live data)';
+            }
+
+            // Lav et opslag: ICAO-kode → TAF-data
+            // reduce() bygger et objekt fra et array
+            const tafOpslag = tafListe.reduce((obj, taf) => {
+                obj[taf.icaoId] = taf;
+                return obj;
+            }, {});
+
+            // Byg hvert kort med de modtagne data
+            lufthavne.forEach(lh => {
+                byggKort(lh, tafOpslag[lh.icao] || null);
+            });
+
+            // Opdater tidsstempel
+            const nu = new Date();
+            document.getElementById('sidst-opdateret').textContent =
+                'Sidst opdateret: ' + nu.toLocaleTimeString('da-DK') + ' (UTC data)';
+
+        } catch (fejl) {
+            console.error('Fejl ved hentning af TAF:', fejl);
+            fejlBoks.style.display = 'block';
+            document.getElementById('sidst-opdateret').textContent = 'Hentning mislykkedes';
+        } finally {
+            // Altid: slå loading fra igen
+            knap.disabled = false;
+            spinner.classList.remove('aktiv');
+        }
+    }
+
+
+    // ─── 7. START: BYGG TOMME KORT OG HENT DATA ──────────────────────────────
+    //
+    // Når siden indlæses:
+    // 1. Byg de 10 tomme korte i grid'et
+    // 2. Hent data med det samme
+    // 3. Sæt auto-opdatering hvert 30. minut (TAF opdateres hvert 6. time)
+
+    function init() {
+        const grid = document.getElementById('grid');
+
+        // Opret et tomt kort per lufthavn
+        lufthavne.forEach(lh => {
+            const div = document.createElement('div');
+            div.className = 'kort graa';
+            div.id = 'kort-' + lh.icao;
+            div.innerHTML = `<div class="loading-tekst">Venter...</div>`;
+            grid.appendChild(div);
+        });
+
+        // Hent data med det samme
+        hentAlle();
+
+        // Auto-opdater hvert 30. minut
+        setInterval(hentAlle, 30 * 60 * 1000);
+    }
+
+    // Kør init() når siden er færdig med at indlæse
+    init();
+
+</script>
+
+</body>
+</html>
